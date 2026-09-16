@@ -1,4 +1,4 @@
-"""Simulation d'un atelier de 10 machines CNC.
+"""Génération des données : fait vivre l'atelier seconde après seconde.
 
 Ce module ne connaît pas Kafka : il produit seulement des dictionnaires.
 Séparer la logique métier de l'envoi permet de la tester sans infrastructure.
@@ -17,51 +17,12 @@ import uuid
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from enum import Enum
+
+from data_simulator.machines import FAILURE_CODES, FLEET
+from data_simulator.models import MachineSpec, MachineState, Status
 
 SCHEMA_VERSION = 1
-
-
-class Status(str, Enum):
-    RUNNING = "RUNNING"
-    IDLE = "IDLE"
-    DOWN = "DOWN"
-    MAINTENANCE = "MAINTENANCE"
-
-
-@dataclass(frozen=True)
-class MachineSpec:
-    machine_id: str
-    machine_type: str
-    nominal_rpm: float
-    nominal_temp_c: float
-    nominal_vibration_mm_s: float
-    nominal_power_kw: float
-
-
-FLEET: list[MachineSpec] = [
-    MachineSpec("LATHE-01", "lathe", 2500, 45, 1.2, 11.0),
-    MachineSpec("LATHE-02", "lathe", 2500, 45, 1.2, 11.0),
-    MachineSpec("MILL-01", "mill", 8000, 50, 1.8, 15.0),
-    MachineSpec("MILL-02", "mill", 8000, 50, 1.8, 15.0),
-    MachineSpec("MILL-03", "mill", 12000, 55, 2.0, 18.0),
-    MachineSpec("MILL-04", "mill", 12000, 55, 2.0, 18.0),
-    MachineSpec("ROUTER-01", "router", 18000, 40, 1.5, 7.5),
-    MachineSpec("GRINDER-01", "grinder", 3000, 42, 0.8, 5.5),
-    MachineSpec("DRILL-01", "drill", 4000, 40, 1.0, 4.0),
-    MachineSpec("DRILL-02", "drill", 4000, 40, 1.0, 4.0),
-]
-
-FAILURE_CODES = ["SPINDLE_OVERHEAT", "TOOL_BREAKAGE", "COOLANT_LOW", "AXIS_SERVO_FAULT"]
 MEASURE_FIELDS = ["spindle_rpm", "spindle_temp_c", "vibration_mm_s", "power_kw"]
-
-
-@dataclass
-class MachineState:
-    spec: MachineSpec
-    status: Status = Status.RUNNING
-    tool_wear_pct: float = 0.0
-    remaining_ticks: int = 0  # durée restante dans IDLE / DOWN / MAINTENANCE
 
 
 def to_iso(ts: datetime) -> str:

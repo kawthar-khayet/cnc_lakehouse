@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 
-from simulator.machines import FLEET, FactorySimulator, Status
+from data_simulator.generator import FactorySimulator
+from data_simulator.machines import FLEET
+from data_simulator.models import Status
 
 START = datetime(2026, 9, 15, 8, 0, tzinfo=UTC)
 

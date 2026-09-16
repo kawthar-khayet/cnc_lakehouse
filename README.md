@@ -47,7 +47,37 @@ Prérequis : Docker Desktop, [uv](https://docs.astral.sh/uv/).
 docker compose up -d          # Kafka + Kafka UI + création des topics
 uv sync                       # dépendances Python
 uv run pytest                 # tests du simulateur
-uv run python -m simulator.producer
+uv run python -m data_simulator
 ```
 
 Kafka UI : http://localhost:8085
+
+Options du simulateur (aussi réglables par variables d'environnement) :
+
+| Option | Variable d'environnement | Défaut |
+|---|---|---|
+| `--bootstrap-servers` | `KAFKA_BOOTSTRAP_SERVERS` | `localhost:29092` |
+| `--interval` | `SIMULATOR_INTERVAL_S` | `1.0` |
+| `--dirty-rate` | `SIMULATOR_DIRTY_RATE` | `0.02` |
+| `--seed` | `SIMULATOR_SEED` | aléatoire |
+| `--max-ticks` | `SIMULATOR_MAX_TICKS` | `0` (sans fin) |
+
+## Structure du projet
+
+```
+cnc-lakehouse/
+├── docker-compose.yml             # infrastructure locale
+├── pyproject.toml                 # dépendances Python (uv)
+├── data_simulator/
+│   ├── models.py                  # structures : Status, MachineSpec, MachineState
+│   ├── machines.py                # catalogue : les 10 machines, les codes de panne
+│   ├── generator.py               # simulation : usure, pannes, mesures, données sales
+│   ├── config.py                  # réglages : environnement + ligne de commande
+│   ├── producer.py                # envoi vers Kafka
+│   ├── main.py                    # point d'entrée : relie tout
+│   └── __main__.py                # permet "python -m data_simulator"
+└── tests/
+    ├── test_machine_catalog.py
+    ├── test_generator.py
+    └── test_config.py
+```
