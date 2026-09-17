@@ -1,12 +1,20 @@
 # Stack locale du projet. On ajoute les services au fil des étapes.
-# Étape 1 : Kafka (broker de messages) + Kafka UI (interface web pour inspecter les topics).
+# Étape 1 : Kafka + Kafka UI
+# Étape 2 : MinIO (stockage S3) + catalogue Iceberg REST + Spark (Kafka -> Bronze)
+
+# Identifiants S3 partagés par tous les services qui lisent ou écrivent dans MinIO.
+x-s3-credentials: &s3-credentials
+  AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Copier .env.example en .env}
+  AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Copier .env.example en .env}
+  AWS_REGION: us-east-1 # obligatoire pour le client S3, ignoré par MinIO
 
 services:
+  # ------------------------------------------------------------------ Étape 1 : Kafka
   kafka:
     image: apache/kafka:3.9.0
     container_name: kafka
     ports:
-      - "29092:29092" # accès depuis Windows (le générateur Python)
+      - "29092:29092" # accès depuis Windows (le simulateur Python)
     environment:
       # Mode KRaft : Kafka gère lui-même ses métadonnées, plus besoin de ZooKeeper.
       KAFKA_NODE_ID: 1
@@ -27,6 +35,10 @@ services:
       # Les topics sont créés explicitement par kafka-init, pas "par accident".
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
       KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+      # Les messages sont gardés dans un volume : ils survivent à "docker compose down".
+      KAFKA_LOG_DIRS: /var/lib/kafka/data
+    volumes:
+      - kafka-data:/var/lib/kafka/data
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 > /dev/null 2>&1"]
       interval: 10s
@@ -63,3 +75,92 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: cnc-local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  # ------------------------------------------------------------------ Étape 2 : stockage
+  minio:
+    # Les images MinIO ne sont plus publiées sur Docker Hub : on utilise le registre quay.io.
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: minio
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000" # API S3
+      - "9001:9001" # console web
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?Copier .env.example en .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Copier .env.example en .env}
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  minio-init:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    container_name: minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing local/lakehouse
+    restart: "no"
+
+  iceberg-rest:
+    # Catalogue Iceberg : il sait quelles tables existent et quel fichier de métadonnées
+    # correspond à la version actuelle de chaque table. Les données, elles, sont dans MinIO.
+    image: apache/iceberg-rest-fixture:1.9.2
+    container_name: iceberg-rest
+    user: root # le volume du catalogue appartient à root ; acceptable en local uniquement
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    ports:
+      - "8181:8181"
+    environment:
+      <<: *s3-credentials
+      CATALOG_WAREHOUSE: s3://lakehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://minio:9000
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      # Liste des tables stockée dans un fichier SQLite persistant (sinon perdue au redémarrage).
+      CATALOG_URI: jdbc:sqlite:file:/catalog/iceberg_catalog.db
+      CATALOG_JDBC_USER: iceberg
+      CATALOG_JDBC_PASSWORD: iceberg
+    volumes:
+      - iceberg-catalog:/catalog
+
+  # ------------------------------------------------------------------ Étape 2 : ingestion
+  spark-bronze:
+    build: ./spark
+    image: cnc-lakehouse/spark:3.5.6
+    container_name: spark-bronze
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+      iceberg-rest:
+        condition: service_started
+    command: ["/opt/spark/bin/spark-submit", "/opt/spark/jobs/kafka_to_bronze.py"]
+    ports:
+      - "4040:4040" # interface web de Spark (onglet "Structured Streaming")
+    environment:
+      <<: *s3-credentials
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - ./spark/jobs:/opt/spark/jobs:ro
+      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+      - spark-checkpoints:/opt/spark/checkpoints
+    restart: unless-stopped
+
+volumes:
+  kafka-data:
+  minio-data:
+  iceberg-catalog:
+  spark-checkpoints:

@@ -1,0 +1,3 @@
+# Les jobs Spark tournent avec le Python 3.8 de l'image apache/spark.
+extend = "../pyproject.toml"
+target-version = "py38"

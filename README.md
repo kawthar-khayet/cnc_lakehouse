@@ -22,7 +22,7 @@ flowchart LR
 ## Avancement
 
 - [x] **Étape 1** : Kafka + simulateur de machines (données volontairement imparfaites)
-- [ ] **Étape 2** : stockage objet MinIO + tables Iceberg + Spark Streaming vers Bronze
+- [x] **Étape 2** : stockage objet MinIO + tables Iceberg + Spark Streaming vers Bronze
 - [ ] **Étape 3** : couche Silver (dédoublonnage, retards, valeurs aberrantes)
 - [ ] **Étape 4** : couche Gold (disponibilité, OEE, MTBF/MTTR) + Trino
 - [ ] **Étape 5** : orchestration Airflow
@@ -44,13 +44,36 @@ valeurs nulles, valeurs impossibles) pour être traitées dans la couche Silver.
 Prérequis : Docker Desktop, [uv](https://docs.astral.sh/uv/).
 
 ```bash
-docker compose up -d          # Kafka + Kafka UI + création des topics
+cp .env.example .env          # identifiants locaux de MinIO
+docker compose up -d --build  # toute la stack (le premier build télécharge les jars Spark)
 uv sync                       # dépendances Python
 uv run pytest                 # tests du simulateur
 uv run python -m data_simulator
 ```
 
-Kafka UI : http://localhost:8085
+| Service | Rôle | Interface |
+|---|---|---|
+| Kafka | file de messages temps réel | Kafka UI : http://localhost:8085 |
+| MinIO | stockage objet compatible S3 (fichiers Parquet) | console : http://localhost:9001 |
+| Iceberg REST | catalogue des tables Iceberg | API : http://localhost:8181/v1/config |
+| Spark (`spark-bronze`) | streaming Kafka → tables Bronze | Spark UI : http://localhost:4040 |
+
+Vérifier le contenu de Bronze :
+
+```bash
+docker exec spark-bronze /opt/spark/bin/spark-sql -S -e "SELECT count(*) FROM bronze.telemetry"
+```
+
+## Couche Bronze
+
+Le job [`spark/jobs/kafka_to_bronze.py`](spark/jobs/kafka_to_bronze.py) lit les deux topics en
+continu (micro-batch toutes les 10 s) et écrit dans `bronze.telemetry` et `bronze.machine_events`.
+
+- **Données brutes** : le JSON est gardé tel quel (`payload`) avec ses métadonnées Kafka
+  (partition, offset, horodatage). Un message invalide ne bloque jamais l'ingestion.
+- **Exactement une fois** : le checkpoint Spark et les commits Iceberg garantissent qu'après un
+  arrêt, le job reprend là où il s'était arrêté, sans perte ni doublon (testé).
+- **Partitionnement** par jour d'arrivée dans Kafka.
 
 Options du simulateur (aussi réglables par variables d'environnement) :
 
@@ -67,7 +90,12 @@ Options du simulateur (aussi réglables par variables d'environnement) :
 ```
 cnc-lakehouse/
 ├── docker-compose.yml             # infrastructure locale
+├── .env.example                   # modèle des identifiants (copier en .env)
 ├── pyproject.toml                 # dépendances Python (uv)
+├── spark/
+│   ├── Dockerfile                 # Spark 3.5 + connecteurs Kafka et Iceberg
+│   ├── conf/spark-defaults.conf   # catalogue Iceberg, accès à MinIO
+│   └── jobs/kafka_to_bronze.py    # streaming Kafka -> Bronze
 ├── data_simulator/
 │   ├── models.py                  # structures : Status, MachineSpec, MachineState
 │   ├── machines.py                # catalogue : les 10 machines, les codes de panne
