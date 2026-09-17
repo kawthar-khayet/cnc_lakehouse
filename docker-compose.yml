@@ -1,12 +1,23 @@
 # Stack locale du projet. On ajoute les services au fil des étapes.
 # Étape 1 : Kafka + Kafka UI
 # Étape 2 : MinIO (stockage S3) + catalogue Iceberg REST + Spark (Kafka -> Bronze)
+# Étape 3 : Spark (Bronze -> Silver)
 
 # Identifiants S3 partagés par tous les services qui lisent ou écrivent dans MinIO.
 x-s3-credentials: &s3-credentials
   AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:?Copier .env.example en .env}
   AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:?Copier .env.example en .env}
   AWS_REGION: us-east-1 # obligatoire pour le client S3, ignoré par MinIO
+
+# Configuration commune à tous les jobs Spark (même image, mêmes fichiers).
+x-spark-job: &spark-job
+  build: ./spark
+  image: cnc-lakehouse/spark:3.5.6
+  volumes:
+    - ./spark/jobs:/opt/spark/jobs:ro
+    - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
+    - spark-checkpoints:/opt/spark/checkpoints
+  restart: unless-stopped
 
 services:
   # ------------------------------------------------------------------ Étape 1 : Kafka
@@ -45,6 +56,7 @@ services:
       timeout: 10s
       retries: 12
       start_period: 20s
+    restart: unless-stopped
 
   kafka-init:
     image: apache/kafka:3.9.0
@@ -75,6 +87,7 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: cnc-local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    restart: unless-stopped
 
   # ------------------------------------------------------------------ Étape 2 : stockage
   minio:
@@ -95,6 +108,7 @@ services:
       interval: 5s
       timeout: 5s
       retries: 12
+    restart: unless-stopped
 
   minio-init:
     image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
@@ -136,11 +150,11 @@ services:
       CATALOG_JDBC_PASSWORD: iceberg
     volumes:
       - iceberg-catalog:/catalog
+    restart: unless-stopped
 
-  # ------------------------------------------------------------------ Étape 2 : ingestion
+  # ------------------------------------------------------------------ Étape 2 : Bronze
   spark-bronze:
-    build: ./spark
-    image: cnc-lakehouse/spark:3.5.6
+    <<: *spark-job
     container_name: spark-bronze
     depends_on:
       kafka-init:
@@ -153,11 +167,19 @@ services:
     environment:
       <<: *s3-credentials
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
-    volumes:
-      - ./spark/jobs:/opt/spark/jobs:ro
-      - ./spark/conf/spark-defaults.conf:/opt/spark/conf/spark-defaults.conf:ro
-      - spark-checkpoints:/opt/spark/checkpoints
-    restart: unless-stopped
+
+  # ------------------------------------------------------------------ Étape 3 : Silver
+  spark-silver:
+    <<: *spark-job
+    container_name: spark-silver
+    depends_on:
+      spark-bronze:
+        condition: service_started
+    command: ["/opt/spark/bin/spark-submit", "/opt/spark/jobs/bronze_to_silver.py"]
+    ports:
+      - "4041:4040"
+    environment:
+      <<: *s3-credentials
 
 volumes:
   kafka-data:
